@@ -20,6 +20,7 @@ interface RecorderOptions {
 
 const mocks = vi.hoisted(() => ({
   conversationOptions: null as ConversationOptions | null,
+  recorderCancel: vi.fn(),
   recorderOptions: null as RecorderOptions | null
 }))
 
@@ -44,6 +45,7 @@ vi.mock('./use-voice-recorder', () => ({
     mocks.recorderOptions = options
 
     return {
+      cancel: mocks.recorderCancel,
       dictate: vi.fn(),
       voiceActivityState: { elapsedSeconds: 0, level: 0, status: 'idle' },
       voiceStatus: 'idle'
@@ -60,6 +62,7 @@ describe('useComposerVoice session-transition lifecycle', () => {
     cleanup()
     vi.clearAllMocks()
     mocks.conversationOptions = null
+    mocks.recorderCancel.mockReset()
     mocks.recorderOptions = null
   })
 
@@ -97,6 +100,7 @@ describe('useComposerVoice session-transition lifecycle', () => {
     const recorderA = mocks.recorderOptions!
 
     hook.rerender({ disabled: true, submissionKey: 'session-b' })
+    expect(mocks.recorderCancel).toHaveBeenCalledOnce()
     expect(mocks.conversationOptions?.enabled).toBe(false)
     hook.rerender({ disabled: false, submissionKey: 'session-b' })
 

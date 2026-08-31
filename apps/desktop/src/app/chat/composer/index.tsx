@@ -1,6 +1,15 @@
 import { ComposerPrimitive } from '@assistant-ui/react'
 import { useStore } from '@nanostores/react'
-import { type ClipboardEvent, type FormEvent, type KeyboardEvent, useCallback, useEffect, useMemo, useRef } from 'react'
+import {
+  type ClipboardEvent,
+  type FormEvent,
+  type KeyboardEvent,
+  useCallback,
+  useEffect,
+  useLayoutEffect,
+  useMemo,
+  useRef
+} from 'react'
 
 import { useTourMarker } from '@/app/chat/tour-marker'
 import { useHudComposerDrag } from '@/app/hud/composer-drag'
@@ -45,6 +54,7 @@ import { COMPOSER_DROP_ACTIVE_CLASS, COMPOSER_DROP_FADE_CLASS } from './drop-aff
 import { markActiveComposer, onComposerAttachImagesRequest } from './focus'
 import { HelpHint } from './help-hint'
 import { useAtCompletions } from './hooks/use-at-completions'
+import { useCommittedActionScope } from './hooks/use-committed-action-scope'
 import { useComposerBranch } from './hooks/use-composer-branch'
 import { useComposerDraft } from './hooks/use-composer-draft'
 import { useComposerDrop } from './hooks/use-composer-drop'
@@ -125,13 +135,15 @@ export function ChatBar({
   // end control. Populated after useComposerVoice below (the submit wrapper
   // is created first); render-time assignment keeps the ref current.
   const voiceStopRef = useRef<{ active: boolean; end: () => void }>({ active: false, end: () => {} })
+  const submitScopeKey = queueSessionKey === undefined ? (sessionId ?? null) : queueSessionKey
+  const submitActionIsCurrent = useCommittedActionScope(submitScopeKey, actionsDisabled)
 
   // Every send (typed, queued, voice) passes through the contributed
   // middleware chain first — rewrite / pass-through / cancel. Empty chain =
   // exact pass-through, so surfaces without contributions are byte-identical.
   const onSubmit = useCallback<ChatBarProps['onSubmit']>(
     async (value, options) => {
-      if (actionsDisabled) {
+      if (!submitActionIsCurrent()) {
         return false
       }
 
@@ -152,13 +164,13 @@ export function ChatBar({
 
       const draft = await runComposerMiddleware({ text: value, attachments: options?.attachments })
 
-      if (!draft) {
+      if (!draft || !submitActionIsCurrent()) {
         return false
       }
 
       return onSubmitProp(draft.text, { ...options, attachments: draft.attachments })
     },
-    [actionsDisabled, onSubmitProp]
+    [onSubmitProp, submitActionIsCurrent]
   )
 
   // Which live composer this instance IS (main | tile) — its attachment set,
@@ -177,7 +189,7 @@ export function ChatBar({
   // busy submit routes text to the queue instead of a steer (which would sit
   // undelivered behind the blocked tool batch). Drives the button affordance.
   const blockingPrompt = useStore(useMemo(() => sessionBlockingPrompt(sessionId ?? null), [sessionId]))
-  const activeQueueSessionKey = queueSessionKey || sessionId || null
+  const activeQueueSessionKey = submitScopeKey
 
   // Status items (subagents, background processes) are keyed by the RUNTIME
   // session id — gateway events and process.list both speak that id. Only the
@@ -1002,10 +1014,11 @@ export function ChatBar({
     target: scope.target
   })
 
-  // Keep the typed-stop interceptor (see onSubmit above) in sync with the
-  // live conversation state. Render-time ref assignment, same pattern as
-  // dispatchSubmitRef — no effect needed for a plain mirror.
-  voiceStopRef.current = { active: voiceConversationActive, end: endConversation }
+  // Publish only committed conversation state so an abandoned concurrent
+  // render cannot redirect typed Stop into another session's voice lifecycle.
+  useLayoutEffect(() => {
+    voiceStopRef.current = { active: voiceConversationActive, end: endConversation }
+  }, [endConversation, voiceConversationActive])
 
   const contextMenu = (
     <ContextMenu

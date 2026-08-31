@@ -118,7 +118,10 @@ export function useComposerSubmit({
   // and the exact visible surface captured at click time — every tile stays
   // mounted, and a session can be rendered in more than one pane.
   const dispatchSubmitRef = useRef(dispatchSubmit)
-  dispatchSubmitRef.current = dispatchSubmit
+
+  useLayoutEffect(() => {
+    dispatchSubmitRef.current = dispatchSubmit
+  })
 
   useLayoutEffect(
     () =>

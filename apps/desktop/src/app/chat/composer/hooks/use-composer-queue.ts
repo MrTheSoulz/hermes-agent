@@ -1,5 +1,5 @@
 import { useStore } from '@nanostores/react'
-import { type RefObject, useCallback, useEffect, useRef, useState } from 'react'
+import { type RefObject, useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react'
 
 import { useI18n } from '@/i18n'
 import { triggerHaptic } from '@/lib/haptics'
@@ -84,7 +84,10 @@ export function useComposerQueue({
   const queueParked = Boolean(activeQueueSessionKey && parkedSessions[activeQueueSessionKey])
 
   const [queueEdit, setQueueEdit] = useState<QueueEditState | null>(null)
-  queueEditRef.current = queueEdit
+
+  useLayoutEffect(() => {
+    queueEditRef.current = queueEdit
+  }, [queueEdit, queueEditRef])
 
   const setQueueEditSnapshot = useCallback(
     (next: QueueEditState | null) => {
