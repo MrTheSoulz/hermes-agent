@@ -26,13 +26,24 @@ import { useIncrementalExternalStoreRuntime } from '@/lib/incremental-external-s
 import { modelOptionsQueryKey, requestModelOptions } from '@/lib/model-options'
 import { useStoreSelector } from '@/lib/use-session-slice'
 import { cn } from '@/lib/utils'
-import { migrateSessionDraft } from '@/store/composer'
+import { $composerNewChatGeneration } from '@/store/composer'
 import { migrateQueuedPrompts, parkQueuedPrompts } from '@/store/composer-queue'
+import { composerOwnerMatchesUniqueHint, resolveComposerStorageOwner } from '@/store/composer-storage-owner'
+import { encodeComposerStorageScopeKey, legacyComposerStorageScopeKey } from '@/store/composer-storage-scope'
 import { $introSplash } from '@/store/intro-splash'
 import { $pinnedSessionIds } from '@/store/layout'
 import { $petActive } from '@/store/pet'
 import { $petOverlayActive } from '@/store/pet-overlay'
-import { $activeGatewayProfile, $gatewaySwapTarget, $hydrationSyncProfile, $profiles } from '@/store/profile'
+import {
+  $activeGatewayProfile,
+  $gatewaySwapTarget,
+  $hydrationSyncProfile,
+  $newChatConnectionId,
+  $newChatProfile,
+  $newChatRoute,
+  $profiles,
+  resolveNewChatOwnerRoute
+} from '@/store/profile'
 import {
   $connection,
   $contextSuggestions,
@@ -40,6 +51,7 @@ import {
   $gatewayState,
   $introPersonality,
   $introSeed,
+  $primarySessionOwnerIntent,
   $resumeExhaustedSessionId,
   $sessions,
   getSessionOwnerHint,
@@ -48,7 +60,13 @@ import {
   sessionPinId,
   shouldMigrateComposerScope
 } from '@/store/session'
-import { $focusedStoredSessionId, $sessionStates, sessionTileDelegate } from '@/store/session-states'
+import type { SessionOwnerRoute } from '@/store/session-request-router'
+import {
+  $focusedStoredSessionId,
+  $sessionStates,
+  knownOwnerForSession,
+  sessionTileDelegate
+} from '@/store/session-states'
 import { $transcriptTailBySessionId, transcriptTailState } from '@/store/transcript-tail'
 import { isAuxiliaryWindow, isWatchWindow } from '@/store/windows'
 import type { ModelOptionsResponse } from '@/types/hermes'
@@ -107,6 +125,7 @@ interface ChatViewProps extends Omit<React.ComponentProps<'div'>, 'onSubmit'> {
   onRetryResume: (sessionId: string) => void
   onTranscribeAudio?: (audio: Blob) => Promise<string>
   onDismissError?: (messageId: string) => void
+  sessionOwnerRoute?: SessionOwnerRoute
 }
 
 export function shouldShowChatBar({
@@ -398,7 +417,8 @@ const ChatViewContent = memo(function ChatViewContent({
   onRestoreToMessage,
   onRetryResume,
   onTranscribeAudio,
-  onDismissError
+  onDismissError,
+  sessionOwnerRoute
 }: ChatViewProps) {
   const location = useLocation()
   const { t } = useI18n()
@@ -428,6 +448,12 @@ const ChatViewContent = memo(function ChatViewContent({
   const awaitingResponse = useStore(view.$awaitingResponse)
   const busy = useStore(view.$busy)
   const activeGatewayProfile = useStore($activeGatewayProfile)
+  const connection = useStore($connection)
+  const composerNewChatGeneration = useStore($composerNewChatGeneration)
+  const primarySessionOwnerIntent = useStore($primarySessionOwnerIntent)
+  const newChatConnectionId = useStore($newChatConnectionId)
+  const newChatProfile = useStore($newChatProfile)
+  const newChatRoute = useStore($newChatRoute)
   const contextSuggestions = useStore($contextSuggestions)
   // Per-session (SessionView) reads — a tile IS its session, so these come
   // from the view slice, not the global atoms (which track the primary only).
@@ -458,35 +484,74 @@ const ChatViewContent = memo(function ChatViewContent({
   const sessions = useStore($sessions)
   const resumeExhaustedSessionId = useStore($resumeExhaustedSessionId)
 
-  // Durable composer/queue scope (lineage root) so auto-compression tip rotation
-  // does not wipe an in-progress draft or orphan /queue entries. For the
-  // primary view, the route is authoritative over the store selection — the
-  // latter can be momentarily null/stale mid-switch, which used to leak into
-  // the composer's scope key (#59305). A tile has no route, so it always uses
-  // its own selection directly.
-  const queueSessionKey = useMemo(() => {
-    const effectiveSelectedSessionId = isPrimary
-      ? primaryRouteSelectedSessionId(location.pathname, selectedSessionId)
-      : selectedSessionId
+  const effectiveSelectedSessionId = isPrimary
+    ? primaryRouteSelectedSessionId(location.pathname, selectedSessionId)
+    : selectedSessionId
 
-    return resolveComposerSessionKey(effectiveSelectedSessionId, sessions)
-  }, [isPrimary, location.pathname, selectedSessionId, sessions])
+  // Durable submit scope remains the raw lineage id. Draft persistence gets a
+  // separate exact-owner identity so duplicate stored ids cannot collide.
+  const queueSessionKey = useMemo(
+    () => resolveComposerSessionKey(effectiveSelectedSessionId, sessions),
+    [effectiveSelectedSessionId, sessions]
+  )
 
-  // When the tip row arrives after compression, migrate any tip-keyed stash onto
-  // the durable lineage key before the composer remounts onto that key.
-  //
-  // ONLY same-conversation rekeys (tip → root). The route-driven queueSessionKey
-  // can flip to Session B a frame before the store selection leaves Session A;
-  // migrating on bare inequality would re-home A's queued prompts onto B and
-  // auto-drain them into the wrong chat.
+  const ambientOwner = {
+    connectionId: connection?.connectionId || (connection?.mode === 'local' ? 'local' : ''),
+    profile: activeGatewayProfile
+  }
+
+  const newChatOwnerRevision = JSON.stringify([
+    activeGatewayProfile,
+    connection?.connectionId,
+    connection?.mode,
+    newChatConnectionId,
+    newChatProfile,
+    newChatRoute
+  ])
+
+  const newChatOwner = useMemo(() => (newChatOwnerRevision ? resolveNewChatOwnerRoute() : null), [newChatOwnerRevision])
+  const knownOwner = effectiveSelectedSessionId ? knownOwnerForSession(effectiveSelectedSessionId) : undefined
+
+  const composerOwner = resolveComposerStorageOwner({
+    ambientOwner,
+    isPrimary,
+    knownOwner,
+    newChatOwner,
+    primaryIntent: primarySessionOwnerIntent,
+    selectedSessionId: effectiveSelectedSessionId,
+    tileOwner: !isPrimary ? sessionOwnerRoute : undefined
+  })
+
+  const composerStorageScopeKey = encodeComposerStorageScopeKey(
+    composerOwner,
+    queueSessionKey,
+    queueSessionKey === null ? composerNewChatGeneration : 0
+  )
+
+  const selectedStorageScopeKey = encodeComposerStorageScopeKey(composerOwner, selectedSessionId)
+  const legacyOwnerHint = queueSessionKey ? getSessionOwnerHint(queueSessionKey) : undefined
+
+  const legacyStorageScopeKeys =
+    queueSessionKey === null || composerOwnerMatchesUniqueHint(composerOwner, legacyOwnerHint)
+      ? [legacyComposerStorageScopeKey(composerOwner, queueSessionKey), queueSessionKey]
+      : [legacyComposerStorageScopeKey(composerOwner, queueSessionKey)]
+
+  const lineageStorageMigration = shouldMigrateComposerScope(selectedSessionId, queueSessionKey, sessions)
+
+  const storageMigrationFromKeys = useMemo(
+    () => (lineageStorageMigration ? [selectedStorageScopeKey, selectedSessionId] : undefined),
+    [lineageStorageMigration, selectedSessionId, selectedStorageScopeKey]
+  )
+
+  // Draft-local migration runs inside ChatBar's layout-phase restore. Queue
+  // migration remains its existing passive path.
   useEffect(() => {
-    if (!shouldMigrateComposerScope(selectedSessionId, queueSessionKey, sessions)) {
+    if (!lineageStorageMigration) {
       return
     }
 
-    migrateSessionDraft(selectedSessionId, queueSessionKey)
     migrateQueuedPrompts(selectedSessionId, queueSessionKey)
-  }, [queueSessionKey, selectedSessionId, sessions])
+  }, [lineageStorageMigration, queueSessionKey, selectedSessionId])
 
   // Transcript-side stops (the streaming message's hover Stop, the runtime's
   // cancel) are explicit halts, same as the composer's Stop button: park any
@@ -761,6 +826,7 @@ const ChatViewContent = memo(function ChatViewContent({
               disabled={!gatewayOpen}
               focusKey={activeSessionId}
               gateway={gateway}
+              legacyStorageScopeKeys={legacyStorageScopeKeys}
               maxRecordingSeconds={maxVoiceRecordingSeconds}
               onAddContextRef={onAddContextRef}
               onAddUrl={onAddUrl}
@@ -779,6 +845,8 @@ const ChatViewContent = memo(function ChatViewContent({
               queueSessionKey={queueSessionKey}
               sessionId={activeSessionId}
               state={chatBarState}
+              storageMigrationFromKeys={storageMigrationFromKeys}
+              storageScopeKey={composerStorageScopeKey}
             />
           </Suspense>
         )}

@@ -694,6 +694,18 @@ export interface ProfileUsage {
   tokens: number
 }
 
+/** Exact owner captured when the primary route is opened. */
+export interface PrimarySessionOwnerIntent {
+  ownerRoute: SessionOwnerRoute
+  storedSessionId: string
+}
+
+export const $primarySessionOwnerIntent = atom<PrimarySessionOwnerIntent | null>(null)
+
+export function setPrimarySessionOwnerIntent(intent: PrimarySessionOwnerIntent | null): void {
+  $primarySessionOwnerIntent.set(intent)
+}
+
 export const $sessionProfilesUsage = atom<Record<string, ProfileUsage>>({})
 export const $sessionsLoading = atom(true)
 export const $activeSessionId = atom<string | null>(null)

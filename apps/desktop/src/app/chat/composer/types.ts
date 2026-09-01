@@ -40,6 +40,12 @@ export interface ChatBarProps {
   state: ChatBarState
   gateway?: HermesGateway | null
   queueSessionKey?: string | null
+  /** Exact-owner renderer persistence identity, distinct from submit scope. */
+  storageScopeKey?: string | null
+  /** Explicit compatibility aliases proven to belong to storageScopeKey. */
+  legacyStorageScopeKeys?: readonly (string | null)[]
+  /** Draft-only source scopes re-homed before the destination paints. */
+  storageMigrationFromKeys?: readonly (string | null)[]
   sessionId?: string | null
   cwd?: string | null
   onCancel: () => Promise<void> | void

@@ -96,6 +96,23 @@ import { UrlDialog } from './url-dialog'
 import { chipTypedUrlOnSpace, linkifyUrls } from './url-refs'
 import { VoiceActivity, VoicePlaybackActivity } from './voice-activity'
 
+export function resolveComposerSessionScopes({
+  queueSessionKey,
+  sessionId,
+  storageScopeKey
+}: {
+  queueSessionKey?: string | null
+  sessionId?: string | null
+  storageScopeKey?: string | null
+}): { draftStorageScopeKey: string | null; submitScopeKey: string | null } {
+  const submitScopeKey = queueSessionKey === undefined ? (sessionId ?? null) : queueSessionKey
+
+  return {
+    draftStorageScopeKey: storageScopeKey ?? submitScopeKey,
+    submitScopeKey
+  }
+}
+
 export function ChatBar({
   actionsDisabled = false,
   busy,
@@ -105,7 +122,10 @@ export function ChatBar({
   gateway,
   maxRecordingSeconds = 120,
   queueSessionKey,
+  legacyStorageScopeKeys,
   sessionId,
+  storageMigrationFromKeys,
+  storageScopeKey,
   state,
   onCancel,
   onAddUrl,
@@ -135,7 +155,11 @@ export function ChatBar({
   // end control. Populated after useComposerVoice below (the submit wrapper
   // is created first); render-time assignment keeps the ref current.
   const voiceStopRef = useRef<{ active: boolean; end: () => void }>({ active: false, end: () => {} })
-  const submitScopeKey = queueSessionKey === undefined ? (sessionId ?? null) : queueSessionKey
+  const { draftStorageScopeKey, submitScopeKey } = resolveComposerSessionScopes({
+    queueSessionKey,
+    sessionId,
+    storageScopeKey
+  })
   const submitActionIsCurrent = useCommittedActionScope(submitScopeKey, actionsDisabled)
 
   // Every send (typed, queued, voice) passes through the contributed
@@ -261,7 +285,15 @@ export function ChatBar({
     setComposerText,
     stashAt,
     syncDraftFromEditor
-  } = useComposerDraft({ activeQueueSessionKey, focusKey, inputDisabled, queueEditRef, sessionId })
+  } = useComposerDraft({
+    activeQueueSessionKey: draftStorageScopeKey,
+    focusKey,
+    inputDisabled,
+    legacyStorageScopeKeys,
+    queueEditRef,
+    sessionId,
+    storageMigrationFromKeys
+  })
 
   // Undo/redo. The rich editor bypasses Chromium's editing pipeline for speed,
   // which also bypasses its undo stack — so we own the stack and every edit

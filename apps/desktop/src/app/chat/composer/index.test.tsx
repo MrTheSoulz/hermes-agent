@@ -6,7 +6,7 @@ import { ThreadRuntime } from '@/components/assistant-ui/test-utils'
 
 import type { ChatBarProps } from './types'
 
-import { ChatBar } from './index'
+import { ChatBar, resolveComposerSessionScopes } from './index'
 
 const mocks = vi.hoisted(() => ({
   runComposerMiddleware: vi.fn(async draft => draft)
@@ -128,5 +128,20 @@ describe('ChatBar transition focus', () => {
     })
 
     expect(onSubmit).not.toHaveBeenCalled()
+  })
+})
+
+describe('resolveComposerSessionScopes', () => {
+  it('keeps queue and submit identity separate from canonical draft storage', () => {
+    expect(
+      resolveComposerSessionScopes({
+        queueSessionKey: 'session-a',
+        sessionId: 'runtime-a',
+        storageScopeKey: 'hermes-composer-scope:v2:canonical-a'
+      })
+    ).toEqual({
+      draftStorageScopeKey: 'hermes-composer-scope:v2:canonical-a',
+      submitScopeKey: 'session-a'
+    })
   })
 })

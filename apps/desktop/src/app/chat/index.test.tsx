@@ -6,6 +6,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import { assistantTextPart, type ChatMessage } from '@/lib/chat-messages'
 import { createClientSessionState } from '@/lib/chat-runtime'
+import { decodeComposerStorageScopeKey } from '@/store/composer-storage-scope'
 import {
   $activeSessionId,
   $awaitingResponse,
@@ -54,10 +55,19 @@ vi.mock('./composer', async () => {
   const React = await import('react')
 
   return {
-    ChatBar: ({ actionsDisabled, busy }: { actionsDisabled?: boolean; busy: boolean }) =>
+    ChatBar: ({
+      actionsDisabled,
+      busy,
+      storageScopeKey
+    }: {
+      actionsDisabled?: boolean
+      busy: boolean
+      storageScopeKey?: string
+    }) =>
       React.createElement('textarea', {
         'data-actions-disabled': actionsDisabled ? 'true' : 'false',
         'data-busy': busy ? 'true' : 'false',
+        'data-storage-scope': storageScopeKey,
         'data-testid': 'composer'
       }),
     ChatBarFallback: () => null
@@ -351,5 +361,37 @@ describe('ChatView render isolation', () => {
     expect(composerAfterRuntimeConverges).toBe(composer)
     expect(composerAfterRuntimeConverges.dataset.busy).toBe('false')
     expect(composerAfterRuntimeConverges.dataset.actionsDisabled).toBe('false')
+  })
+
+  it('derives the primary draft identity from the route before selection catches up', () => {
+    const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } })
+
+    function RouteHarness() {
+      const navigate = useNavigate()
+
+      return (
+        <>
+          <button onClick={() => navigate('/stored-2')} type="button">
+            Route to B
+          </button>
+          <ChatView {...chatViewProps()} />
+        </>
+      )
+    }
+
+    render(
+      <QueryClientProvider client={queryClient}>
+        <MemoryRouter initialEntries={['/stored-1']}>
+          <RouteHarness />
+        </MemoryRouter>
+      </QueryClientProvider>
+    )
+
+    fireEvent.click(screen.getByRole('button', { name: 'Route to B' }))
+
+    const scope = (screen.getByTestId('composer') as HTMLTextAreaElement).dataset.storageScope
+    expect(scope).toBeTruthy()
+    expect(decodeComposerStorageScopeKey(scope!)).toMatchObject({ storedSessionId: 'stored-2' })
+    expect($selectedStoredSessionId.get()).toBe('stored-1')
   })
 })

@@ -21,7 +21,7 @@ import {
 } from '@/hermes'
 import { createClientSessionState } from '@/lib/chat-runtime'
 import { $clarifyRequests, clearClarifyRequest, setClarifyRequest } from '@/store/clarify'
-import { clearSessionDraft, stashSessionDraft, takeSessionDraft } from '@/store/composer'
+import { $composerNewChatGeneration, clearSessionDraft, stashSessionDraft, takeSessionDraft } from '@/store/composer'
 import { requestGatewayForAgent, requestGatewayForProfile } from '@/store/gateway'
 import { $pinnedSessionIds } from '@/store/layout'
 import { $activeGatewayProfile, $newChatProfile, $newChatRoute, $profiles, ensureGatewayProfile } from '@/store/profile'
@@ -513,7 +513,27 @@ async function createWith(
 }
 
 describe('startFreshSessionDraft', () => {
-  afterEach(() => cleanup())
+  afterEach(() => {
+    cleanup()
+    $composerNewChatGeneration.set(0)
+  })
+
+  it('rotates the New Chat draft generation for every fresh draft', async () => {
+    const navigate = vi.fn()
+    const requestGateway = vi.fn(async () => ({}) as never)
+    let handle: HarnessHandle | null = null
+
+    $composerNewChatGeneration.set(0)
+    render(<Harness navigate={navigate} onReady={value => (handle = value)} requestGateway={requestGateway} />)
+    await waitFor(() => expect(handle).not.toBeNull())
+
+    act(() => handle!.startFreshSessionDraft({ preserveRoute: true }))
+    const first = $composerNewChatGeneration.get()
+    act(() => handle!.startFreshSessionDraft({ preserveRoute: true }))
+
+    expect(first).not.toBe(0)
+    expect($composerNewChatGeneration.get()).not.toBe(first)
+  })
 
   it('can reset machine-bound session state without closing the current overlay route', async () => {
     const navigate = vi.fn()

@@ -2,6 +2,9 @@ import { atom } from 'nanostores'
 
 import { deriveDraftTitle } from '@/lib/draft-title'
 import { triggerHaptic } from '@/lib/haptics'
+import { persistentAtom } from '@/lib/persisted'
+
+import { type ComposerNewChatGeneration, encodeComposerStorageScopeKey } from './composer-storage-scope'
 
 export interface ComposerAttachment {
   id: string
@@ -31,6 +34,39 @@ export type ComposerAttachmentPatch = Partial<Omit<ComposerAttachment, 'id' | 'o
 export const $composerDraft = atom('')
 export const $composerAttachments = atom<ComposerAttachment[]>([])
 export const $composerTerminalSelections = atom<Record<string, string>>({})
+const createComposerNewChatGeneration = (): ComposerNewChatGeneration => crypto.randomUUID()
+
+const decodeComposerNewChatGeneration = (raw: string): ComposerNewChatGeneration => {
+  const value = Number(raw)
+
+  if (Number.isSafeInteger(value) && value >= 0) {
+    return value
+  }
+
+  try {
+    encodeComposerStorageScopeKey({ connectionId: 'local', profile: 'default' }, null, raw)
+
+    return raw
+  } catch {
+    return createComposerNewChatGeneration()
+  }
+}
+
+export const $composerNewChatGeneration = persistentAtom<ComposerNewChatGeneration>(
+  'hermes.desktop.composerNewChatGeneration',
+  createComposerNewChatGeneration(),
+  {
+    decode: decodeComposerNewChatGeneration,
+    encode: value => String(value)
+  }
+)
+
+export const advanceComposerNewChatGeneration = (): ComposerNewChatGeneration => {
+  const next = createComposerNewChatGeneration()
+  $composerNewChatGeneration.set(next)
+
+  return next
+}
 
 // Latched because opening a fresh session may remount the main composer before
 // it can start voice. Session-tile composers deliberately never consume this.
@@ -207,7 +243,45 @@ function loadPersistedDraftTexts(): [string, SessionDraft][] {
   }
 }
 
-const draftsBySession = new Map<string, SessionDraft>(loadPersistedDraftTexts())
+const initialPersistedDrafts = loadPersistedDraftTexts()
+const draftsBySession = new Map<string, SessionDraft>(initialPersistedDrafts)
+let persistedTextKeys = new Set(initialPersistedDrafts.map(([key]) => key))
+const draftRevisionsBySession = new Map<string, number>()
+
+function attachmentEqual(a: ComposerAttachment, b: ComposerAttachment): boolean {
+  return (
+    a.id === b.id &&
+    a.occurrenceId === b.occurrenceId &&
+    a.kind === b.kind &&
+    a.label === b.label &&
+    a.detail === b.detail &&
+    a.refText === b.refText &&
+    a.previewUrl === b.previewUrl &&
+    a.thumbnailUrl === b.thumbnailUrl &&
+    a.path === b.path &&
+    a.attachedSessionId === b.attachedSessionId &&
+    a.uploadState === b.uploadState
+  )
+}
+
+function draftEqual(a: SessionDraft | undefined, b: SessionDraft | undefined): boolean {
+  if (!a || !b) {
+    return a === b
+  }
+
+  return (
+    a.text === b.text &&
+    a.attachments.length === b.attachments.length &&
+    a.attachments.every((item, index) => attachmentEqual(item, b.attachments[index]!))
+  )
+}
+
+function bumpDraftRevision(key: string): number {
+  const revision = (draftRevisionsBySession.get(key) ?? 0) + 1
+  draftRevisionsBySession.set(key, revision)
+
+  return revision
+}
 
 /**
  * Patch one asynchronous attachment occurrence wherever the main composer owns
@@ -232,6 +306,7 @@ export function patchMainComposerAttachmentOccurrence(
     const attachments = [...draft.attachments]
     attachments[index] = { ...attachments[index]!, ...patch }
     draftsBySession.set(key, { ...draft, attachments })
+    bumpDraftRevision(key)
     updated = true
   }
 
@@ -297,19 +372,43 @@ function publishDraftTitle(key: string, title: string): void {
 export function reloadPersistedDrafts(): void {
   const incoming = new Map(loadPersistedDraftTexts())
 
-  for (const [key, draft] of incoming) {
+  for (const [key, incomingDraft] of incoming) {
     const local = draftsBySession.get(key)
-    draftsBySession.set(key, local?.attachments.length ? { ...local, text: draft.text } : draft)
-    publishDraftTitle(key, deriveDraftTitle(draft.text))
+    const next = local?.attachments.length ? { ...local, text: incomingDraft.text } : incomingDraft
+
+    if (!draftEqual(local, next)) {
+      bumpDraftRevision(key)
+    }
+
+    draftsBySession.set(key, next)
+    publishDraftTitle(key, deriveDraftTitle(incomingDraft.text))
   }
 
-  // A key that vanished from storage was cleared (sent) in the other window.
-  for (const key of [...draftsBySession.keys()]) {
-    if (!incoming.has(key)) {
-      draftsBySession.delete(key)
-      publishDraftTitle(key, '')
+  // Missing persisted text is an external clear only for keys that previously
+  // had persisted text. Attachment-only drafts are memory-only and survive.
+  for (const key of persistedTextKeys) {
+    if (incoming.has(key)) {
+      continue
     }
+
+    const local = draftsBySession.get(key)
+
+    if (local?.attachments.length) {
+      const next = { ...local, text: '' }
+
+      if (!draftEqual(local, next)) {
+        draftsBySession.set(key, next)
+        bumpDraftRevision(key)
+      }
+    } else if (local) {
+      draftsBySession.delete(key)
+      bumpDraftRevision(key)
+    }
+
+    publishDraftTitle(key, '')
   }
+
+  persistedTextKeys = new Set(incoming.keys())
 }
 
 // localStorage `storage` events fire across Electron BrowserWindows of the
@@ -374,23 +473,40 @@ function persistDraftTexts() {
     } else {
       window.localStorage.setItem(SESSION_DRAFTS_STORAGE_KEY, JSON.stringify(Object.fromEntries(entries)))
     }
+
+    persistedTextKeys = new Set(entries.map(([key]) => key))
   } catch {
     // Best-effort only — quota/private-mode must never break typing.
   }
 }
 
-export function stashSessionDraft(scope: string | null | undefined, text: string, attachments: ComposerAttachment[]) {
+export function sessionDraftRevision(scope: string | null | undefined): number {
+  return draftRevisionsBySession.get(draftKey(scope)) ?? 0
+}
+
+export function stashSessionDraft(
+  scope: string | null | undefined,
+  text: string,
+  attachments: ComposerAttachment[]
+): number {
   const key = draftKey(scope)
+  const next = text.trim() || attachments.length > 0 ? cloneDraft({ attachments, text }) : undefined
+
+  if (draftEqual(draftsBySession.get(key), next)) {
+    return sessionDraftRevision(scope)
+  }
 
   // Delete-then-set keeps MRU order for MAX_PERSISTED_DRAFTS eviction.
   draftsBySession.delete(key)
 
-  if (text.trim() || attachments.length > 0) {
-    draftsBySession.set(key, cloneDraft({ attachments, text }))
+  if (next) {
+    draftsBySession.set(key, next)
   }
 
   persistDraftTexts()
   publishDraftTitle(key, deriveDraftTitle(text))
+
+  return bumpDraftRevision(key)
 }
 
 export function takeSessionDraft(scope: string | null | undefined): SessionDraft {
@@ -400,6 +516,38 @@ export function takeSessionDraft(scope: string | null | undefined): SessionDraft
 }
 
 export const clearSessionDraft = (scope: string | null | undefined) => stashSessionDraft(scope, '', [])
+
+export function clearSessionDraftIfMatches(
+  scope: string | null | undefined,
+  text: string,
+  attachments: ComposerAttachment[]
+): number | null {
+  reloadPersistedDrafts()
+
+  const key = draftKey(scope)
+  const expected = text.trim() || attachments.length > 0 ? { attachments, text } : undefined
+  const current = draftsBySession.get(key)
+
+  if (!current) {
+    return clearSessionDraft(scope)
+  }
+
+  if (!draftEqual(current, expected)) {
+    return null
+  }
+
+  return clearSessionDraft(scope)
+}
+
+export function clearSessionDraftIfRevision(scope: string | null | undefined, expectedRevision: number): boolean {
+  if (sessionDraftRevision(scope) !== expectedRevision) {
+    return false
+  }
+
+  clearSessionDraft(scope)
+
+  return true
+}
 
 /**
  * Move a stashed composer draft from one session key onto another.
@@ -414,7 +562,7 @@ export function migrateSessionDraft(fromKey: string | null | undefined, toKey: s
   const from = draftKey(fromKey)
   const to = draftKey(toKey)
 
-  if (!fromKey || !toKey || from === to) {
+  if (fromKey === undefined || !toKey || from === to) {
     return false
   }
 
@@ -431,6 +579,32 @@ export function migrateSessionDraft(fromKey: string | null | undefined, toKey: s
   }
 
   stashSessionDraft(toKey, source.text, source.attachments)
+  clearSessionDraft(fromKey)
+
+  return true
+}
+
+/** Consume one explicitly proven compatibility draft for one qualified owner. */
+export function claimSessionDraft(fromKey: string | null | undefined, toKey: string | null | undefined): boolean {
+  const from = draftKey(fromKey)
+  const to = draftKey(toKey)
+
+  if (fromKey === undefined || !toKey || from === to) {
+    return false
+  }
+
+  const source = draftsBySession.get(from)
+
+  if (!source || (!source.text.trim() && source.attachments.length === 0)) {
+    return false
+  }
+
+  const destination = draftsBySession.get(to)
+
+  if (!destination || (!destination.text.trim() && destination.attachments.length === 0)) {
+    stashSessionDraft(toKey, source.text, source.attachments)
+  }
+
   clearSessionDraft(fromKey)
 
   return true

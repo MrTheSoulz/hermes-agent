@@ -27,15 +27,22 @@ interface ProbeHarnessProps {
   activeQueueSessionKey: string | null
   onLayoutSnapshot: (attachments: ComposerAttachment[]) => void
   sessionId: string
+  storageMigrationFromKeys?: readonly (string | null)[]
 }
 
-function ProbeHarness({ activeQueueSessionKey, onLayoutSnapshot, sessionId }: ProbeHarnessProps) {
+function ProbeHarness({
+  activeQueueSessionKey,
+  onLayoutSnapshot,
+  sessionId,
+  storageMigrationFromKeys
+}: ProbeHarnessProps) {
   useComposerDraft({
     activeQueueSessionKey,
     focusKey: null,
     inputDisabled: false,
     queueEditRef: { current: null as QueueEditState | null },
-    sessionId
+    sessionId,
+    storageMigrationFromKeys
   })
 
   // useLayoutEffect fires synchronously right after the DOM commit, BEFORE
@@ -56,6 +63,8 @@ describe('useComposerDraft — attachment scope stays coherent with the committe
     mainComposerScope.clear()
     clearSessionDraft('session-A')
     clearSessionDraft('session-B')
+    clearSessionDraft('lineage-root')
+    clearSessionDraft('lineage-tip')
     delete (window as unknown as { hermesDesktop?: unknown }).hermesDesktop
     vi.unstubAllGlobals()
     $connection.set(null)
@@ -90,6 +99,22 @@ describe('useComposerDraft — attachment scope stays coherent with the committe
     // By the layout phase the scope must already be B's (empty) — a submit
     // fired the instant B renders must never ship session A's attachment.
     expect(snapshots[0]).toEqual([])
+  })
+
+  it('migrates an incoming lineage draft before the destination paints', () => {
+    stashSessionDraft('lineage-tip', 'unsent draft from tip', [])
+    mockComposerApi.setText.mockClear()
+
+    render(
+      <ProbeHarness
+        activeQueueSessionKey="lineage-root"
+        onLayoutSnapshot={() => undefined}
+        sessionId="runtime-root"
+        storageMigrationFromKeys={['lineage-tip']}
+      />
+    )
+
+    expect(mockComposerApi.setText).toHaveBeenCalledWith('unsent draft from tip')
   })
 
   it('applies a delayed image preview when it resolves while its attachment draft is inactive', async () => {

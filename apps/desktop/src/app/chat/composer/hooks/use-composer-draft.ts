@@ -12,8 +12,10 @@ import { type RefObject, useCallback, useEffect, useLayoutEffect, useRef, useSta
 import { SLASH_COMMAND_RE } from '@/lib/chat-runtime'
 import { sanitizeComposerInput } from '@/lib/composer-input-sanitize'
 import {
+  claimSessionDraft,
   type ComposerAttachment,
   type ComposerDraftSyncMode,
+  migrateSessionDraft,
   onComposerDraftSyncRequest,
   reloadPersistedDrafts,
   stashSessionDraft,
@@ -52,8 +54,10 @@ interface UseComposerDraftArgs {
   activeQueueSessionKey: string | null
   focusKey: ChatBarProps['focusKey']
   inputDisabled: boolean
+  legacyStorageScopeKeys?: readonly (string | null)[]
   queueEditRef: RefObject<QueueEditState | null>
   sessionId: string | null | undefined
+  storageMigrationFromKeys?: readonly (string | null)[]
 }
 
 /**
@@ -70,8 +74,10 @@ export function useComposerDraft({
   activeQueueSessionKey,
   focusKey,
   inputDisabled,
+  legacyStorageScopeKeys,
   queueEditRef,
-  sessionId
+  sessionId,
+  storageMigrationFromKeys
 }: UseComposerDraftArgs) {
   const aui = useAui()
   const composerRuntime = useComposerRuntime()
@@ -406,6 +412,14 @@ export function useComposerDraft({
     pendingDraftPersistRef.current = null
     draftScopeRef.current = activeQueueSessionKey
 
+    for (const sourceScopeKey of storageMigrationFromKeys ?? []) {
+      migrateSessionDraft(sourceScopeKey, activeQueueSessionKey)
+    }
+
+    for (const legacyScopeKey of legacyStorageScopeKeys ?? []) {
+      claimSessionDraft(legacyScopeKey, activeQueueSessionKey)
+    }
+
     const { attachments, text } = takeSessionDraft(activeQueueSessionKey)
     loadIntoComposer(text, attachments)
 
@@ -425,7 +439,7 @@ export function useComposerDraft({
       // lingers in the map and re-appears stale on the way back.
       clearDraftSuggestions(sessionIdRef.current)
     }
-  }, [activeQueueSessionKey]) // eslint-disable-line react-hooks/exhaustive-deps
+  }, [activeQueueSessionKey, legacyStorageScopeKeys, storageMigrationFromKeys]) // eslint-disable-line react-hooks/exhaustive-deps
 
   // The HUD handoff's two verbs. Entering HUD mode flushes this editor's text
   // into the shared stash so the HUD's composer boots with it; leaving repaints

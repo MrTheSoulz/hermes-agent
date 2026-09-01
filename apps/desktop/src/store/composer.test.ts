@@ -2,21 +2,43 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 
 import {
   $composerAttachments,
+  $composerNewChatGeneration,
   $voiceConversationStartRequest,
   addComposerAttachment,
+  advanceComposerNewChatGeneration,
+  claimSessionDraft,
   clearSessionDraft,
+  clearSessionDraftIfMatches,
+  clearSessionDraftIfRevision,
   type ComposerAttachment,
   createComposerAttachmentOccurrenceId,
   createComposerAttachmentScope,
   migrateSessionDraft,
+  reloadPersistedDrafts,
   removeComposerAttachment,
   requestVoiceConversationStart,
   SESSION_DRAFTS_STORAGE_KEY,
+  sessionDraftRevision,
   stashSessionDraft,
   takeSessionDraft,
   takeVoiceConversationStart,
   updateComposerAttachment
 } from './composer'
+import { encodeComposerStorageScopeKey } from './composer-storage-scope'
+
+describe('New Chat storage identities', () => {
+  afterEach(() => $composerNewChatGeneration.set(0))
+
+  it('allocates distinct identities from the same stale cross-window snapshot', () => {
+    $composerNewChatGeneration.set(12)
+    const first = advanceComposerNewChatGeneration()
+
+    $composerNewChatGeneration.set(12)
+    const second = advanceComposerNewChatGeneration()
+
+    expect(first).not.toBe(second)
+  })
+})
 
 describe('voice conversation start requests', () => {
   it('latches each request until the main composer consumes it once', () => {
@@ -207,8 +229,13 @@ describe('updateComposerAttachment', () => {
 })
 
 describe('session drafts', () => {
+  const ownerA = { connectionId: 'source-a', profile: 'profile-a' }
+  const ownerB = { connectionId: 'source-b', profile: 'profile-a' }
+  const ownerAScope = encodeComposerStorageScopeKey(ownerA, 'shared-session')
+  const ownerBScope = encodeComposerStorageScopeKey(ownerB, 'shared-session')
+
   afterEach(() => {
-    for (const scope of ['session-a', 'session-b', null]) {
+    for (const scope of ['session-a', 'session-b', ownerAScope, ownerBScope, 'stored-legacy', null]) {
       clearSessionDraft(scope)
     }
 
@@ -242,6 +269,50 @@ describe('session drafts', () => {
     >
 
     expect(persisted['session-a']).toBe('survives reload')
+  })
+
+  it('persists duplicate stored ids under exact-owner keys', () => {
+    stashSessionDraft(ownerAScope, 'owner A', [])
+    stashSessionDraft(ownerBScope, 'owner B', [])
+
+    const persisted = JSON.parse(window.localStorage.getItem(SESSION_DRAFTS_STORAGE_KEY) ?? '{}') as Record<
+      string,
+      string
+    >
+
+    expect(persisted).toMatchObject({ [ownerAScope]: 'owner A', [ownerBScope]: 'owner B' })
+    expect(takeSessionDraft(ownerAScope).text).toBe('owner A')
+    expect(takeSessionDraft(ownerBScope).text).toBe('owner B')
+  })
+
+  it('advances the revision when another window replaces a persisted draft', () => {
+    stashSessionDraft('session-a', 'submitted text', [])
+    const submittedRevision = sessionDraftRevision('session-a')
+
+    window.localStorage.setItem(SESSION_DRAFTS_STORAGE_KEY, JSON.stringify({ 'session-a': 'newer other-window draft' }))
+    reloadPersistedDrafts()
+
+    expect(sessionDraftRevision('session-a')).toBeGreaterThan(submittedRevision)
+    expect(clearSessionDraftIfRevision('session-a', submittedRevision)).toBe(false)
+    expect(takeSessionDraft('session-a').text).toBe('newer other-window draft')
+  })
+
+  it('does not erase a newer persisted draft when dispatch clears a stale renderer snapshot', () => {
+    stashSessionDraft('session-a', 'submitted text', [])
+    window.localStorage.setItem(SESSION_DRAFTS_STORAGE_KEY, JSON.stringify({ 'session-a': 'newer other-window draft' }))
+
+    expect(clearSessionDraftIfMatches('session-a', 'submitted text', [])).toBeNull()
+    expect(takeSessionDraft('session-a').text).toBe('newer other-window draft')
+  })
+
+  it('preserves attachment-only inactive drafts when another window updates persisted text', () => {
+    stashSessionDraft('session-a', '', [attachment({ id: 'image:a', kind: 'image' })])
+    window.localStorage.setItem(SESSION_DRAFTS_STORAGE_KEY, JSON.stringify({ 'session-b': 'other window text' }))
+
+    reloadPersistedDrafts()
+
+    expect(takeSessionDraft('session-a').attachments.map(item => item.id)).toEqual(['image:a'])
+    expect(takeSessionDraft('session-b').text).toBe('other window text')
   })
 
   it('evicts empty drafts instead of leaving stale entries behind', () => {
@@ -290,5 +361,26 @@ describe('session drafts', () => {
 
     clearSessionDraft('from')
     clearSessionDraft('to')
+  })
+
+  it('migrates the legacy New Chat draft into an exact-owner scope', () => {
+    const qualified = encodeComposerStorageScopeKey(ownerA, null, 7)
+    stashSessionDraft(null, 'new chat before owner scoping', [])
+
+    expect(migrateSessionDraft(null, qualified)).toBe(true)
+    expect(takeSessionDraft(qualified).text).toBe('new chat before owner scoping')
+    expect(takeSessionDraft(null).text).toBe('')
+
+    clearSessionDraft(qualified)
+  })
+
+  it('claims a proven legacy draft once even when the destination is non-empty', () => {
+    stashSessionDraft('stored-legacy', 'legacy unqualified draft', [])
+    stashSessionDraft(ownerAScope, 'newer owner A draft', [])
+
+    expect(claimSessionDraft('stored-legacy', ownerAScope)).toBe(true)
+    expect(takeSessionDraft(ownerAScope).text).toBe('newer owner A draft')
+    expect(takeSessionDraft('stored-legacy').text).toBe('')
+    expect(claimSessionDraft('stored-legacy', ownerBScope)).toBe(false)
   })
 })
