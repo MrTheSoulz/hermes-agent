@@ -38,11 +38,8 @@ import {
   subZonePosition
 } from '@/components/pane-shell/tree/renderer/drag-session'
 import {
-  $layoutTree,
   $treeDragging,
   type DropHint,
-  isMainStripPane,
-  isSessionStripPane,
   moveTreePane,
   revealTreePane,
   SESSION_TILE_DRAG
